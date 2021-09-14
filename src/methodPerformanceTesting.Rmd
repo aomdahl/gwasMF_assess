@@ -1,0 +1,1092 @@
+---
+title: "Sandbox: Use LDSC to assess factorization"
+output: html_notebook
+---
+```{r setup, echo  = FALSE}
+pacman::p_load(data.table, tidyr, dplyr, readr, ggplot2, stringr)
+```
+
+This notebook is me exploring ways/developing code to use LDSC to assess factorization
+First, starting with the method/data from `trait_analysis.Rmd` in /work-zfs/abattle4/ashton/snp_networks/scratch/cross_ancestry_factorization/seed2_thresh0.9_h2-0.1_pan
+
+```{r}
+dir <- "/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/ldsc_results/seed2_thres0.9_h2-0.1/"
+file.list <- list.files("/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/ldsc_results/seed2_thres0.9_h2-0.1/",pattern = "*.txt")
+all <- lapply(file.list, function(x) fread(paste0(dir, x)) %>% arrange("Name") %>% mutate("Source" = gsub(x = x,pattern = ".cell_type_results.txt", replacement = "")))
+todos <- plyr::rbind.fill(all) %>% mutate("-log10(P)" =-log10(Coefficient_P_value))
+labels <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/ldsc_reference/finucane_2018_supp_table7.ashton.csv")
+yes<-subset(labels, labels$entex=="Yes")
+yes$Name<-paste(yes$tissue, "_ENTEX__", yes$mark, sep="")
+no<-subset(labels, labels$entex=="No")
+no$Name<-paste(no$tissue, no$mark, sep="__")
+labels<-rbind(yes, no)
+        
+for_plotting <- left_join(todos, labels, by  = "Name") %>% arrange(new_category) %>% select(-entex) %>% group_by(Source) %>% mutate("within_trait_FDR" = p.adjust(Coefficient_P_value, method = "fdr"))
+for_plotting$overall_FDR <- p.adjust(for_plotting$Coefficient_P_value, method = "fdr")
+ldsc_reference <- for_plotting %>% print()
+```
+Now, we want to use this as a reference to compare against a factorization and its enrichment.
+For this first pass, we will use `PMA_91_2.3`
+To do that, we pull code from `visualizeLDSC.R`
+### Get enrichment results
+```{r}
+ext <- "*.cell_type_results.txt"
+dir <- "/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/results/PMA_91_2.3_8-11/ldsc_enrichment_Multi_tissue_chromatin/"
+file.list <- list.files(dir, pattern = ext)
+all <- lapply(file.list, function(x) fread(paste0(dir, x)) %>% arrange("Name") %>% mutate("Source" = str_extract(str_split(x, pattern = "\\.")[[1]][1], pattern = "F\\d+")))  
+todos <- plyr::rbind.fill(all) %>% mutate("-log10(P)" =-log10(Coefficient_P_value))
+labels <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/ldsc_reference/finucane_2018_supp_table7.ashton.csv")
+
+#Kyped the following code from Rebecca Keener on 6/2/2021
+yes<-subset(labels, labels$entex=="Yes")
+yes$Name<-paste(yes$tissue, "_ENTEX__", yes$mark, sep="")
+no<-subset(labels, labels$entex=="No")
+no$Name<-paste(no$tissue, no$mark, sep="__")
+labels<-rbind(yes, no)
+substitution_regex = "__"
+substitution_regex_to = "-"
+
+factorization.enrichment <- left_join(todos, labels, by  = "Name") %>% arrange(new_category) %>% select(-entex) %>% group_by(Source) %>% mutate("within_trait_FDR" = p.adjust(Coefficient_P_value, method = "fdr")) %>% ungroup()
+factorization.enrichment$overall_FDR <- p.adjust(factorization.enrichment$Coefficient_P_value, method = "fdr")
+factorization.enrichment
+```
+TODO: the above body of code is all copy-paste nonsense. Fix that you lazy coder.
+
+### Get factorization results
+```{r}
+factorization <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/factorization_data/PMA_91_2.3_8-11.factors.txt")
+trait.names <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.names.tsv", what = character())
+trait.studies <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.studies.tsv", what = character())
+cbind(trait.names, factorization)
+```
+Okay, so the thought is something like this:
+ For trait t, determine which factors are non-zero for it. 
+ *Starting here with Systolic blood pressure, because its at the top of the list*
+```{r}
+factors <- which(factorization[1,] != 0)
+relative_weights <- factorization[1,..factors]^2/sum(factorization[1,..factors]^2)
+```
+Then determine which cell-types/groups are enriched for those ones, and count it.
+Note that an important decision here is the FDR filter- do we do the overall one or the sample specific one?
+For now, I will be conservative and do the overall one.
+TODO: in the future, maybe loosen the FDR requirement.
+```{r}
+filtered.factorization <- factorization.enrichment %>% filter(Source %in% paste0("F", factors)) %>% filter(overall_FDR < 0.01) %>% select(Source, tissue, mark, new_category) %>% print()
+```
+Compare the above to what this trait actually gets in LDSC:
+Here, for fairness, going with `overall_FDR`, but I think `within_trait_FDR` would be better.
+```{r}
+filtered.reference <- ldsc_reference %>% filter(Source == trait.studies[1]) %>% filter(within_trait_FDR < 0.01) %>% select(tissue, mark, new_category) %>% print()
+```
+Okay, so what do I keep track of? The overlapping number of tissues?
+I say tissues...
+```{r}
+tissue.matches <- sum(unique(filtered.reference$tissue) %in% unique(filtered.factorization$tissue))
+tissue.matches/length(unique(filtered.reference$tissue))
+```
+and category
+```{r}
+cat.matches <- sum(unique(filtered.reference$new_category) %in% unique(filtered.factorization$new_category))
+cat.matches/length(unique(filtered.reference$tissue))
+```
+More precisely, we want to calculate precision `(TP/(TP + FP))` and recall `TP/(TP + FN)`
+```{r}
+TP = sum(unique(filtered.factorization$tissue) %in% unique(filtered.reference$tissue))
+FP = sum(!(unique(filtered.factorization$tissue) %in% unique(filtered.reference$tissue)))
+FN = sum(!(unique(filtered.reference$tissue) %in% unique(filtered.factorization$tissue)))
+TP/(TP+FP)
+TP/(TP+FN)
+```
+
+SO: it seems like our procedure is pretty well defined. We want to investigate the effects of different parameter choices on these things, so let's functionalize this all and make it nice and fast
+Functions include:
+```
+readIn
+filterFactorization
+filterReference
+calculatePerformance
+```
+Determine which tissues/categories a given trait is enriched for by looking at the factor matrix (`filterFactorization`)
+```{r}
+#This yields the matrix containing the significant factored data from the factorization and matrix enrichment analysis.
+filterFactorization <- function(trait.index, fact.matrix, fact.enrichment, FDR = 0.01, overall_FDR = TRUE)
+{
+  factors <- which(fact.matrix[trait.index,] != 0)
+  if(length(factors) == 0)
+  {
+    #no factors significant here; return an empty table
+    print(paste0("No factors significant for ", trait.index))
+    ret <- fact.enrichment %>% dplyr::filter(overall_FDR < 0) %>% dplyr::select(Source, tissue, mark, new_category, overall_FDR)
+    return(ret)
+  }
+  #relative_weights <- fact.matrix[trait.index,..factors]^2/sum(fact.matrix[trait.index,..factors]^2)
+  filtered.fact <- fact.enrichment %>% filter(Source %in% paste0("F", factors))
+  if(overall_FDR)
+  {
+     filtered.fact <- filtered.fact %>% filter(overall_FDR < FDR) %>% select(Source, tissue, mark, new_category, overall_FDR)
+  }else
+  {
+    filtered.fact <- filtered.fact %>% filter(within_trait_fdr < FDR) %>% select(Source, tissue, mark, new_category, overall_FDR)
+  }
+  return(filtered.fact)
+}
+```
+
+Determine which tissues/categories a given trait is "actually" enriched for by looking at the LDSC results (`filterReference`)
+Note that be default, we want to do the within_trait FDR since we are only examining across a single trait, not across many traits.
+```{r}
+filterReference <- function(ldsc.ref, trait.id, FDR = 0.01, overall_FDR = FALSE)
+{
+  n <-  ldsc.ref %>% filter(Source == trait.id)
+  if(overall_FDR)
+  {
+    n %>% ungroup() %>% filter(overall_FDR < FDR) %>% select(tissue, mark, new_category)
+    
+  } else{
+    n %>% ungroup() %>% filter(within_trait_FDR < FDR) %>% select(tissue, mark, new_category)
+  }
+}
+```
+
+Assess performance
+Here, its very basic- if it overlaps, we count it.
+```{r}
+calcPerformance <- function(fact.enrichment, ref.enrichment)
+{
+  ret <- list()
+  if(dim(fact.enrichment)[1] == 0 && (dim(ref.enrichment)[1] != 0))
+  {
+    ret$precision <- 0
+    ret$recall <- 0
+    return(ret)
+  }else if(dim(fact.enrichment)[1] == 0 && (dim(ref.enrichment)[1] == 0))
+  {
+    ret$precision <- 1
+    ret$recall <- 1
+    return(ret)
+  }else{
+      TP = sum(unique(fact.enrichment$tissue) %in% unique(ref.enrichment$tissue))
+  FP = sum(!(unique(fact.enrichment$tissue) %in% unique(ref.enrichment$tissue)))
+  FN = sum(!(unique(ref.enrichment$tissue) %in% unique(fact.enrichment$tissue)))
+  
+  ret$precision <- TP/(TP+FP)
+  ret$recall <- TP/(TP+FN)
+  return(ret)
+  }
+}
+```
+And finally, reading in the data
+```{r}
+readIn <- function(dir, ext, type = "ldsc reference")
+{
+    file.list <- list.files(dir, pattern = ext)
+    
+    if(type == "ldsc reference")
+    {
+      all <- lapply(file.list, function(x) fread(paste0(dir, x)) %>% arrange("Name") %>% mutate("Source" = gsub(x = x,pattern = ".cell_type_results.txt", replacement = "")))
+    }else
+    {
+      all <- lapply(file.list, function(x) fread(paste0(dir, x)) %>% arrange("Name") %>% mutate("Source" = str_extract(str_split(x, pattern = "\\.")[[1]][1], pattern = "F\\d+"))) 
+    }
+     todos <- plyr::rbind.fill(all) %>% mutate("-log10(P)" =-log10(Coefficient_P_value))
+    labels <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/ldsc_reference/finucane_2018_supp_table7.ashton.csv")
+  #Kyped the following code from Rebecca Keener on 6/2/2021
+  yes<-subset(labels, labels$entex=="Yes")
+  yes$Name<-paste(yes$tissue, "_ENTEX__", yes$mark, sep="")
+  no<-subset(labels, labels$entex=="No")
+  no$Name<-paste(no$tissue, no$mark, sep="__")
+  labels<-rbind(yes, no)
+  substitution_regex = "__"
+  substitution_regex_to = "-"
+  
+  ret <- left_join(todos, labels, by  = "Name") %>% arrange(new_category) %>% select(-entex) %>% group_by(Source) %>% 
+    mutate("within_trait_FDR" = p.adjust(Coefficient_P_value, method = "fdr")) %>% ungroup()
+  ret$overall_FDR <- p.adjust(ret$Coefficient_P_value, method = "fdr")
+  ret
+}
+```
+### And putting it all together
+```{r}
+#Read in
+ldsc.reference <- readIn("/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/ldsc_results/seed2_thres0.9_h2-0.1/", "*.txt", type= "ldsc reference") %>% print()
+
+factorization.enrichment <- readIn("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/results/PMA_91_2.3_8-11/ldsc_enrichment_Multi_tissue_chromatin/", "*.cell_type_results.txt", type = "factorization enrichment") %>% print()
+
+factorization <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/factorization_data/PMA_91_2.3_8-11.factors.txt")
+
+trait.names <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.names.tsv", what = character())
+trait.studies <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.studies.tsv", what = character())
+```
+Quick test of functions
+```{r}
+#systolic blood pressure is number 1
+#don't forget to read in the factorization matrix!
+trait.id <- trait.studies[1]
+fact.enrichment <- filterFactorization(1, factorization, factorization.enrichment, FDR = 0.01, overall_FDR = TRUE) #don't for
+ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = 0.01, overall_FDR = FALSE)
+calcPerformance(fact.enrichment, ref.enrichment)
+```
+into a function: actually calculating performance
+```{r}
+assessPerformance <- function(ldsc.ref, fact.enrichment, factorization, trait.ids, ind, fdr_factor =0.05, fdr_ref = 0.05)
+{
+  trait.id <- trait.ids[ind]
+  fact.enrichment <- filterFactorization(ind, factorization, factorization.enrichment, FDR = fdr_factor, overall_FDR = TRUE) #don't for
+  ref.enrichment <- filterReference(ldsc.ref, trait.id, FDR = fdr_ref, overall_FDR = FALSE)
+  calcPerformance(fact.enrichment, ref.enrichment)
+}
+```
+
+Okay! Seems to be decently on the way. Let's see what happens as I loosen the thresholds
+```{r}
+fdrs <- seq(0.01, 1,by = 0.05)
+pr_measure <- matrix(0, length(fdrs), 2)
+for(i in 1:length(fdrs))
+{
+  pr_measure[i,] <- unlist(assessPerformance(ldsc.reference,factorization.enrichment, factorization,trait.studies,1, fdr_factor = fdrs[i]))
+}
+
+```
+Plot it cuz I'm nice like that
+```{r}
+library(ggplot2)
+pr <- data.frame("thresh" = fdrs, pr_measure)
+names(pr) <- c("thresh", "precision", "recall")
+ggplot(pr, aes(x = recall, y = precision)) + geom_line(color = "blue") + geom_abline(intercept = 0, slope = 1,linetype="dashed") + theme_minimal(15)
+```
+Functionalize that whole ish
+```{r}
+traitFDRPRCurve <- function(ldsc.reference, factorization.enrichment, factorization, trait.studies, trait.names, ind, fdr.ref){
+  fdrs <- seq(0.01, 1,by = 0.01)
+  pr_measure <- matrix(0, length(fdrs), 2)
+  for(i in 1:length(fdrs))
+  {
+    pr_measure[i,] <- unlist(assessPerformance(ldsc.reference,factorization.enrichment, factorization,trait.studies,ind, fdr_factor = fdrs[i], fdr_ref = fdr.ref))
+  }
+  library(ggplot2)
+  pr <- data.frame("thresh" = fdrs, pr_measure)
+  names(pr) <- c("thresh", "precision", "recall")
+  p <- ggplot(pr, aes(x = recall, y = precision)) + geom_line(color = "blue") + geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "black") +  theme_minimal(15) + ggtitle(paste0("PR Curve:", trait.names[ind]))
+  return(p)
+}
+```
+run that...
+```{r}
+print("FDr ref is 0.05")
+for(i in 1:length(trait.studies))
+{
+  print(i)
+  print(traitFDRPRCurve(ldsc.reference, factorization.enrichment, factorization, trait.studies,trait.names, i, fdr.ref = 0.05))
+}
+
+```
+________________________________________________________________________________________________________________________________________
+Okay, this is a solid first pass on this. Now though, I need to figure out the bugs.
+For one, if we loosen FDR to 0, we expect perfect precision and recall since all will be matched. This doesn't appear to be the case, not sure why. [FIXED]
+Also some traits, like `comparative body size` don't have any plots at all. For some, it makes sense- no enrichments detected. But for others that doesn't make sense.
+Also, maybe I should be *fixing* FDR threshold for the reference and allow it change for what we count. That will give us something more interesting.
+^This is what I have done. Generally, pretty terrible performance I'd say.
+```{r}
+print("FDR ref is 0.10")
+for(i in 1:length(trait.studies))
+{
+  print(i)
+  print(traitFDRPRCurve(ldsc.reference, factorization.enrichment, factorization, trait.studies,trait.names, i, fdr.ref = 0.10))
+}
+```
+Okay, I need to dig into these.
+Let's see...
+  * Comparative_height_size_at_age_10 is confirmed 0 across the board
+
+So for those with 0, there are no factors, so they get dropped. quick manual check showed these are all the ones that got dropped.
+Two that are odd:glycated heamoglobin and  immature reticulocyte fraction
+```{r}
+trait.names
+ind <- which(trait.names == "Glycated_haemoglobin_(mmolmol)")
+trait.id <- trait.ids[ind]
+  fact.enrichment <- filterFactorization(ind, factorization, factorization.enrichment, FDR = fdr_factor, overall_FDR = TRUE) #don't for
+  ref.enrichment <- filterReference(ldsc.ref, trait.id, FDR = fdr_ref, overall_FDR = FALSE)
+  calcPerformance(fact.enrichment, ref.enrichment)
+```
+
+In addition to these kinds of plots, it would be nice to have one with the bars, where we have matching colors, matching order to the original, with the percent weight by tissue as given by the factors.
+To do this in the reference case, I think instead of counting #s we should look at the top p-value per category and go from that
+
+# 8/23
+
+Now, we want a summary score across many of these- AUC- to use to compare model performances. This will give us a good idea of performance.
+Also, I need to do the ancestry thing. Patience, my young apprentice.
+To calculate area under the curve, we have options.
+Here, just by tissue....
+```{r}
+library(PRROC)
+library(ROCR)
+ldsc.reference %>% filter(Source =="30700_irnt") #creatinine
+trait.id <- trait.studies[55]
+fact.enrichment <- filterFactorization(1, factorization, factorization.enrichment, FDR = 1, overall_FDR = TRUE) #don't for
+#we want to convert it to a list of 1/0
+answer.fact <-  fact.enrichment %>% group_by(tissue) %>% slice(which.min(overall_FDR)) %>% mutate("class_prob" = 1-overall_FDR) %>% ungroup() %>% arrange(tissue)
+ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = 0.05, overall_FDR = FALSE)
+#full list of categoryie
+all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
+est <- data.frame("names" = all.tissues, "labels" = as.integer(all.tissues %in% ref.enrichment$tissue), "probs" = answer.fact$class_prob )
+
+pr <- pr.curve(scores.class0=est[est$labels==1,]$probs,
+             scores.class1=est[est$labels==0,]$probs,
+             curve=T)
+plot(pr)
+```
+Quick check of the above
+```{r}
+est %>% arrange(-probs)
+fact.enrichment %>% arrange(overall_FDR)
+```
+
+This gives rise to a new function- 
+```{r}
+areaPRPlot <- function(ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
+{
+  trait.id <- trait.studies[ind]
+  fact.enrichment <- filterFactorization(trait.index = ind, fact.matrix = factorization, fact.enrichment = factorization.enrichment, FDR = 1, overall_FDR = TRUE) #give me all the hits
+
+  #get the correct answers
+  all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
+  ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) 
+  
+  #Check for some weird edge cases...
+   if(nrow(fact.enrichment) == 0) #we have an empty factor, no enrichments in the factor
+  {
+    #est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = runif(length(all.tissues), 0, 0.05) )
+    psuedo <- list()
+    psuedo$auc.integral <- 0
+    psuedo$auc.davis.goadrich <- 0
+    return(psuedo)
+   } else{ #we do have something..
+    answer.fact <-  fact.enrichment %>% group_by(tissue) %>% slice(which.min(overall_FDR)) %>% mutate("class_prob" = 1-overall_FDR) %>% ungroup() %>% arrange(tissue)
+   }
+  
+  if(!any(all.tissues %in% ref.enrichment$tissue)) #this trait had no enrichments in LDSC
+  {
+    ref.panel <- rep(0, length(all.tissues)) #this is the case when its NA....
+    est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = answer.fact$class_prob ) %>% add_row(names = "extra", labels = 1, probs = 0.5)
+  }else
+    ref.panel <- as.integer(all.tissues %in% ref.enrichment$tissue)
+    est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = answer.fact$class_prob )  #TODO: evaluate this. is this correct?
+
+  #full list of categoryie
+ back <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
+             scores.class1=est[est$labels==0,]$probs,
+             curve=T)
+ return(back)
+}
+```
+Across all traits, let's see what we get
+```{r}
+res <- matrix(NA, 55, 2)
+for(i in 1:55)
+{
+  trait.id <- trait.studies[i]
+  pr <- areaPRPlot(i, trait.studies, factorization, factorization.enrichment, ldsc.reference)
+  res[i,1] <- pr$auc.integral
+  res[i,2] <- pr$auc.davis.goadrich
+  if(!is.na(res[i,1]) && res[i,1] != 0)
+  {
+      print(plot(pr,xlab = trait.names[i]))
+  }
+  if(i %in% errors)
+  {
+    print(pr)
+  }
+
+}
+```
+So for these area under the curves, we map each to its factors and do the weighted average.....
+`w` weights are from the factors
+average values are pr scores above
+```{r}
+library(stats)
+res[is.na(res[,1]), 1] <- 0
+factor.avgs <- sapply(1:15, function(i) weighted.mean(x = res[,1], w = unlist(factorization[,..i]^2)))
+barplot(factor.avgs, names.arg = 1:15, xlab = "Factors 1-15", ylab = "Average AUPR", horiz = TRUE)
+```
+
+
+# 8/24
+*FIRST* debug: what happens with the NAs? what is going on theree?
+```{r}
+errors <- which(is.na(res[,1]))
+trait.names[errors]
+```
+Let's look at these individually...
+```{r}
+fact.enrichment <- filterFactorization(errors[2], factorization, factorization.enrichment, FDR = 1, overall_FDR = TRUE) #give me all the hits
+answer.fact <-  fact.enrichment %>% group_by(tissue) %>% slice(which.min(overall_FDR)) %>% mutate("class_prob" = 1-overall_FDR) %>% ungroup() %>% arrange(tissue)
+ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) 
+#full list of categoryie
+all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
+est <- data.frame("names" = all.tissues, "labels" = as.integer(all.tissues %in% ref.enrichment$tissue), "probs" = answer.fact$class_prob )
+pr.curve(scores.class0=est[est$labels==1,]$probs,
+             scores.class1=est[est$labels==0,]$probs,
+             curve=T)
+```
+Give me a plot showing the performance across all traits
+```{r, fig.height = 10}
+plot <- data.frame("names" = trait.names,"auprc" = res[,1])
+plot
+ggplot(dat = plot, aes(x = reorder(names, -auprc), y = auprc)) + geom_bar(stat = "identity")  + theme_minimal(15) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + scale_x_discrete(label = function(x) abbreviate(x, minlength = 20)) +
+  xlab("Trait") + ylab("AUPR")
+  
+
+```
+
+
+
+
+After some thinking, I think scoring factors this way misrepresents each factor's performance. It basically aggregates across all factros involved for each trait in the factor.
+A better approach would be to score each individual trait WRT to Factor f only, and then take the weighted average.
+```{r}
+#@PARAM f.ind: the index of the factor we are looking at
+#@param trait.studies: the list of trait study identifiers
+#@param factorization: the actual factorization matrix
+#@param factorization.enrichment: the enrichment information for each factor
+#@param ldsc.reference: the ldsc enrichment information for each trait (our answers/reference
+#@param answer_thresh: the threshold at which enrichments are counted as true
+#Note that here we depart from previous method by accounting for within-"trait" FDR (i.e. across a single factor), not across all factors.
+#The reason for this is that we are interested only in the performance of a single factor.
+#This can easily be changed, see "factor.enrichments <- ..."
+factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
+{
+  pr.list <- list()
+  factor.id <- paste0("F", f.ind)
+  #get the traits in the factor that are nonzero
+  relevant.traits <- which(factorization[,..f.ind] != 0)
+  #determine all of the tissues which are enriched for that factor and their FDR score. Pick only the highest marker per tissue.
+  factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
+    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
+  all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
+  #FOR EACH of those traits
+  for(t in relevant.traits)
+  {
+   trait.id <- trait.studies[t]
+   #Identify all the "true" enrichment for said trait
+   ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
+   #Of those, which are enriched in Factor matrix?
+   ref.panel <- as.integer(all.tissues %in% unique(ref.enrichment$tissue))
+   #the label is 1 if a trait is enriched for that tissue at FDR = answer_thres, 0 otherwise
+   est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = factor.enrichments$class_prob )
+   
+   #get the area under the PR curve
+   pr.list[[t]] <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
+             scores.class1=est[est$labels==0,]$probs,
+             curve=T)
+  }
+  #calculate a weighted average...
+library(stats)
+pr.scores <- unlist(lapply(relevant.traits, function(i) pr.list[[i]]$auc.integral)) #extract the actual PR scores we've calculated
+drop <- which(is.na(pr.scores))
+if(length(drop) < 1)
+{
+  weights <-  unlist(factorization[relevant.traits,..f.ind]^2 / sum(factorization[relevant.traits,..f.ind]^2)) #extract the weights
+}else
+{
+  weights <-  unlist(factorization[relevant.traits,..f.ind]^2 / sum(factorization[relevant.traits,..f.ind]^2))[-drop] #extract the weights
+  pr.scores <- pr.scores[-drop]
+}
+
+back <- list()
+back$traits <- relevant.traits
+back$aupr <- pr.scores
+back$weights <- weights
+back$wmean <- weighted.mean(x = pr.scores, w = weights)
+
+return(back)
+}
+```
+
+```{r}
+res <- NULL
+means <- c()
+for(i in 1:ncol(factorization))
+{
+  r <- factorSpecificAUPR(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
+  n <- rep(paste0("F", i), length(r$aupr))
+  ret <- cbind(n, as.numeric(r$aupr), as.numeric(r$weights))
+  res <- rbind(res, ret)
+  means <- c(means, r$wmean)
+}
+means <- data.frame("factor" = paste0("F", 1:ncol(factorization)), "wmean" = means)
+```
+Can we make a nice weighted boxplot?
+```{r}
+rest <- data.frame(res)
+names(rest) <- c("factor", "aupr", "weight")
+rest$aupr <- as.numeric(as.character(rest$aupr))
+rest$weight <- as.numeric(as.character(rest$weight))
+rest$factor <- factor(rest$factor, levels = paste0("F", 1:ncol(factorization)))
+library(epade)
+box.plot.wtd(x = "aupr", group = "factor",w = "weight", data = rest,outlier = TRUE)
+barplot(names.arg = unlist(means$factor), height = means$wmean,col = "skyblue", xlab = "Factor", ylab = "weighted mean")
+```
+Not that impressed with that plot... try a weighted one....
+```{r, fig.width= 10}
+library(Hmisc)
+library(plyr)
+library(ggplot2)
+library(cowplot)
+
+ggplot(rest, aes(x = factor, y = aupr, weight = weight)) + 
+  geom_boxplot() + 
+  geom_point(data=means,aes(x=factor,y=wmean), color = "coral", size = 3,shape = 4, inherit.aes=FALSE) + 
+  theme_minimal(18) + xlab("Factor") + ylab("Weighted AUPR")
+
+```
+
+
+How would I permute to generate a background?
+For factor with real enrichments, just randomly assign a probability from 0 --> 1 to each, see what the curves look like?
+
+Okay, I feel better about this factor specific method. Let's move it over to the codebasefile...
+
+#9/1
+Another method to try out, just as an alternative voice, since I don't love the weighted average on it...
+The difference here- we don't take the weighted average, but look at enrichments shared across all traits.
+Looking at it, the answer threshold is loosened a little bit, to 10% FDR, just to avoid zero-ing things out.
+```{r}
+#@PARAM f.ind: the index of the factor we are looking at
+#@param trait.studies: the list of trait study identifiers
+#@param factorization: the actual factorization matrix
+#@param factorization.enrichment: the enrichment information for each factor
+#@param ldsc.reference: the ldsc enrichment information for each trait (our answers/reference
+#@param answer_thresh: the threshold at which enrichments are counted as true
+#Note that here we depart from previous method by accounting for within-"trait" FDR (i.e. across a single factor), not across all factors.
+#This differs from the above method in that we look at perf
+factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1, nshared = 1)
+{
+  pr.list <- list()
+  factor.id <- paste0("F", f.ind)
+  #get the traits in the factor that are nonzero
+  relevant.traits <- which(factorization[,..f.ind] != 0)
+  #determine all of the tissues which are enriched for that factor and their FDR score. Pick only the highest marker per tissue.
+  factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
+    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
+  
+  all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
+  
+
+  #FOR EACH of those traits, track which enrichments shared by all (intersect)
+  
+  
+  for(i in 1:length(relevant.traits)){
+    t = relevant.traits[i]
+   trait.id <- trait.studies[t]
+   ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
+   if(i == 1)
+   {
+      tissue.relevant.traits <- unique(ref.enrichment$tissue)
+     #print(tissue.relevant.traits)
+   } else  {
+     #n  == 1 case
+     tissue.relevant.traits <- intersect(tissue.relevant.traits,unique(ref.enrichment$tissue))
+     #print(tissue.relevant.traits)
+   }
+  }
+  ref.panel <- as.integer(all.tissues %in% tissue.relevant.traits)
+   #the label is 1 if a trait is enriched for that tissue at FDR = answer_thres, 0 otherwise
+   est <- data.frame("names" = all.tissues, "labels" = ref.panel, 
+                     "probs" = factor.enrichments$class_prob )
+   
+   #get the area under the PR curve
+   pr.list <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
+             scores.class1=est[est$labels==0,]$probs,
+             curve=T)
+
+  back <- list()
+  back$FactorTraits <- relevant.traits
+  back$aupr <- pr.list
+  back$sharedHits <- sum(est$labels)
+  back$sharedTissues <- tissue.relevant.traits
+  back$pvals <- 
+  return(back)
+}
+```
+test this out 
+
+You know, I'm not sure what teh best way to plot this is... the message here is we are grouping traits together in a way that isn't necessarily tissue specific. Yup.
+```{r}
+t <- ceiling(sqrt(ncol(factorization)))
+par(mfrow=c(t,t))
+l <- list()
+for(i in 1:ncol(factorization))
+{
+  b <- factorSpecificAUPRShared(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+  l[[i]] <- factorSpecificAUPRShared(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+} 
+
+```
+Okay,it would be interesting and valuable just to see how many of the traits we group actually have olverlapping tissues
+```{r}
+sum(sapply(1:length(l), function(x) l[[x]]$sharedHits > 0))
+```
+l[[1
+]]
+
+Okay. We get results that seem way off for our very sparse version, want to confirm it....
+```{r}
+#Read in
+ldsc.reference <- readIn("/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/ldsc_results/seed2_thres0.9_h2-0.1/", "*.txt", type= "ldsc reference") %>% print()
+
+factorization.enrichment <- readIn("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/results/beta_se_fixed_first900_900//ldsc_enrichment_Multi_tissue_chromatin/", "*.cell_type_results.txt", type = "factorization enrichment") %>% print()
+
+factorization <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/factorization_data/beta_se_fixed_first900_900.factors.txt")
+
+trait.names <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.names.tsv", what = character())
+trait.studies <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.studies.tsv", what = character())
+
+l <- list()
+for(i in 1:ncol(factorization))
+{
+  b <- factorSpecificAUPRShared(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+  l[[i]] <- factorSpecificAUPRShared(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+  print(paste0("Factor num: ", i))
+  print(b$sharedTraits)
+  plot(b$aupr)
+}
+
+
+```
+I'd like to ahve a table with information across factors so I can something about how many of the shared relationships are meaningful.....
+```{r}
+answer_thres = 0.1
+full.tab <- NULL
+for(i in 1:ncol(factorization))
+{
+  #number of non-zero traits in the factor
+  fcount <- sum(factorization[,..i] != 0)
+  num.shared <- l[[i]]$sharedHits
+  tissues.shared <- paste(unlist(l[[i]]$sharedTraits), collapse = ',')
+  if(num.shared == 0)
+  {
+     true.enrichment <- data.frame("tissue" = "NA", "Source" = "NA", "Coefficient_P_value" = NA)
+    add.on <- data.frame("Factor" = i, "NumTraitsInFactor" = fcount, "NumSharedTissues" = num.shared, "TraitName" = NA, true.enrichment)
+    full.tab <- rbind(full.tab,add.on)
+
+  } else{
+      for(j in which(factorization[,..i] != 0)){
+    trait.id <- trait.studies[j]
+    trait.name <- trait.names[j]
+    true.enrichment <- ldsc.reference %>% filter(Source == trait.id, tissue %in% unlist(l[[i]]$sharedTraits)) %>% group_by(tissue) %>% slice(which.min(Coefficient_P_value)) %>%
+      ungroup() %>% select(tissue, Source, Coefficient_P_value)
+
+    add.on <- data.frame("Factor" = i, "NumTraitsInFactor" = fcount, "NumSharedTissues" = num.shared, "TraitName" = trait.name,  true.enrichment)
+    full.tab <- rbind(full.tab,add.on)
+  }
+  }
+
+  
+}
+
+```
+Make it a function
+```{r}
+combineTraitAssessment <- function(factorization, l){
+    answer_thres = 0.1
+  full.tab <- NULL
+  for(i in 1:ncol(factorization))
+  {
+    #number of non-zero traits in the factor
+    fcount <- sum(factorization[,..i] != 0)
+    num.shared <- l[[i]]$sharedHits
+    tissues.shared <- paste(unlist(l[[i]]$sharedTraits), collapse = ',')
+    if(num.shared == 0)
+    {
+       true.enrichment <- data.frame("tissue" = "NA", "Source" = "NA", "Coefficient_P_value" = NA)
+      add.on <- data.frame("Factor" = i, "NumTraitsInFactor" = fcount, "NumSharedTissues" = num.shared, "TraitName" = NA, true.enrichment)
+      full.tab <- rbind(full.tab,add.on)
+  
+    } else{
+        for(j in which(factorization[,..i] != 0)){
+      trait.id <- trait.studies[j]
+      trait.name <- trait.names[j]
+      true.enrichment <- ldsc.reference %>% filter(Source == trait.id, tissue %in% unlist(l[[i]]$sharedTraits)) %>% group_by(tissue) %>% slice(which.min(Coefficient_P_value)) %>%
+        ungroup() %>% select(tissue, Source, Coefficient_P_value)
+  
+      add.on <- data.frame("Factor" = i, "NumTraitsInFactor" = fcount, "NumSharedTissues" = num.shared, "TraitName" = trait.name,  true.enrichment)
+      full.tab <- rbind(full.tab,add.on)
+    }
+    }
+  
+  }
+  return(full.tab)
+}
+```
+
+
+
+
+
+In essence, we want to answer the simple questions- how many of the traits we put together in a factor actually have shared common tissue patterns?
+Now, actually making something useful from this...
+```{r}
+desired <- full.tab %>% filter(NumTraitsInFactor != 1, NumSharedTissues > 0)  %>% print()
+print("factors with 1) more than 1 trait (2) overlapping tissue enrichemtns")
+print(unique(desired$Factor))
+```
+
+Now, plot those...
+```{r, fig.width=15}
+f3 <- desired %>% filter(Factor == 3) 
+ggplot(f3, aes(x = TraitName, y = -log10(Coefficient_P_value), color = tissue)) + geom_point() + theme_minimal(15) + geom_line(aes(group = tissue)) + 
+  theme(axis.text.x = element_text(angle = 50, hjust = 1)) + scale_x_discrete(label = function(x) stringr::str_trunc(string = x, width = 27))
+```
+
+Hmm.. maybe a heatmap would be better
+```{r}
+f3 <- desired %>% filter(Factor == 3) 
+clust <- f3 %>% select(Source, tissue, Coefficient_P_value) %>% pivot_wider(id_cols = c("Source", "tissue"), names_from = c("Source"), values_from = Coefficient_P_value)
+
+o <- hclust(dist(clust[,-1]))$order
+name.order <- as.character(unlist(clust$tissue)[o])
+f3$tissue <- factor(f3$tissue, level  = name.order)
+ggplot(f3, aes(x = TraitName, y = tissue, fill = -log10(Coefficient_P_value))) + geom_tile() + theme(axis.text.x = element_text(angle = 50, hjust = 1)) + scale_x_discrete(label = function(x) stringr::str_trunc(x, width  =27)) + scale_fill_gradient(low = "white", high = "red") + xlab("Trait")
+```
+Make this into a nice fuunction
+
+```{r}
+factorSpecificHeatmap <- function(desired, fnum)
+{
+  f3 <- desired %>% filter(Factor == fnum) 
+  clust <- f3 %>% select(Source, tissue, Coefficient_P_value) %>% pivot_wider(id_cols = c("Source", "tissue"), names_from = c("Source"), values_from = Coefficient_P_value)
+
+  o <- hclust(dist(clust[,-1]))$order
+  name.order <- as.character(unlist(clust$tissue)[o])
+  f3$tissue <- factor(f3$tissue, level  = name.order)
+  ggplot(f3, aes(x = TraitName, y = tissue, fill = -log10(Coefficient_P_value))) + geom_tile() + theme(axis.text.x = element_text(angle = 50, hjust = 1)) + scale_x_discrete(label = function(x) stringr::str_trunc(x, width  =27)) + scale_fill_gradient(low = "white", high = "red") + xlab("Trait") + ylab("Enriched Tissue") + ggtitle(paste0("Factor ", fnum, " Trait enrichments"))
+  }
+
+```
+Now try for some more
+```{r, fig.width=12}
+unique(desired$Factor)
+factorSpecificHeatmap(desired, 3)
+factorSpecificHeatmap(desired, 4)
+factorSpecificHeatmap(desired, 7)
+factorSpecificHeatmap(desired, 11)
+factorSpecificHeatmap(desired, 12)
+```
+I think it would be even better to add another column on there with the enrichments from the factor, let's see if we can't....
+```{r}
+f.side <- factorization.enrichment %>% filter(Source == "F3") %>% filter(within_trait_FDR < 0.2) %>% group_by(tissue) %>% slice(which.min(within_trait_FDR)) %>% 
+  ungroup() %>% select(Source, tissue, category, Coefficient_P_value)#This tells us what tissues to get enrichments for too
+t.side <- full.tab %>% filter(Factor == 3, NumTraitsInFactor > 1, NumSharedTissues > 0) #This tells us what tissues and Traits to get data for
+mixed.tissues <- union(f.side$tissue, t.side$tissue)
+t.side.pvals <- ldsc.reference %>% filter(Source %in% t.side$Source, tissue %in% mixed.tissues) %>% group_by(Source, tissue) %>% slice(which.min(Coefficient_P_value)) %>% 
+  ungroup() %>% select(Source, tissue, category, Coefficient_P_value)
+combined <- rbind(f.side, t.side.pvals) %>% print()
+```
+
+Now, the nice heatmap we made above....
+```{r, fig.width=15}
+
+factorGenericHeatmap <- function(intab, fnum)
+{
+  clust <- intab %>% select(Source, tissue, Coefficient_P_value) %>% pivot_wider(id_cols = c("Source", "tissue"), names_from = c("Source"), values_from = Coefficient_P_value)
+  
+  #o <- hclust(dist(clust[,-1]))$order
+  #name.order <- as.character(unlist(clust$tissue)[o])
+  #try ordering by factor enrichment
+  name.order <- unlist((intab %>% filter(Source == paste0("F", fnum)) %>% arrange(-Coefficient_P_value))$tissue)
+  intab$tissue <- factor(intab$tissue, level  = name.order)
+  ggplot(intab, aes(x = Source, y = tissue, fill = -log10(Coefficient_P_value))) + geom_tile() + theme(axis.text.x = element_text(angle = 50, hjust = 1)) + scale_x_discrete(label = function(x) stringr::str_trunc(x, width  =27)) + scale_fill_gradient(low = "white", high = "red") + xlab("Trait") + ylab("Enriched Tissue") + ggtitle(paste0("Factor ", fnum, " Trait enrichments"))
+}
+
+factorGenericHeatmap(combined, 3)
+#add a box around those that are overlapping in our traits of interest.
+
+
+
+
+
+# convert x and y variables to factors
+traits <- as.factor(intab$Source)
+tissue <- as.factor(intab$tissue)
+
+# numeric version of the levels to be bound by a box
+tr.len <- length(levels(traits))
+xmax <- unique(as.numeric(traits[traits == levels(traits)[tr.len]]))
+xmin <- unique(as.numeric(traits[traits == levels(traits)[1]]))
+
+#We only want tissues in our group 
+ti.include <- factor(unique((t.side %>% arrange(tissue))$tissue), levels = levels(tissue))
+ymin <- min(sapply(1:length(ti.include), function(i) unique(as.numeric(tissue[tissue == ti.include[i]]))))
+ymax <- max(sapply(1:length(ti.include), function(i) unique(as.numeric(tissue[tissue == ti.include[i]]))))
+
+# set offset
+offset <- 0.5
+
+ggplot(intab, aes(x = Source, y = tissue, fill = -log10(Coefficient_P_value))) + geom_tile() + theme(axis.text.x = element_text(angle = 50, hjust = 1)) + scale_x_discrete(label = function(x) stringr::str_trunc(x, width  =27)) + scale_fill_gradient(low = "white", high = "red") + xlab("Trait") + ylab("Enriched Tissue") + ggtitle(paste0("Factor ", fnum, " Trait enrichments")) +   geom_rect(aes(xmin = xmin - offset,
+                xmax = xmax + offset,
+                ymin = ymin - offset,
+                ymax = ymax + offset),
+            fill = "transparent", color = "red", size = 1.5)
+
+```
+erm, pretty complex.
+Maybe just color the traits that are in a certain color?
+```{r, fig.width=10}
+
+combineFactorAndTruth <- function(factor, thresh, full.tab, fact.enrichment)
+{
+  f.side <- fact.enrichment %>% filter(Source == paste0("F", factor)) %>% filter(within_trait_FDR < thresh) %>% group_by(tissue) %>% slice(which.min(within_trait_FDR)) %>% 
+  ungroup() %>% select(Source, tissue, category, Coefficient_P_value) %>% select(Source, tissue, category, Coefficient_P_value)#This tells us what tissues to get enrichments for too
+#t.side <- full.tab %>% filter(Factor == factor, NumTraitsInFactor > 1, NumSharedTissues > 0) #This tells us what tissues and Traits to get data for
+t.side <- full.tab %>% filter(Factor == factor, NumSharedTissues > 0) 
+  mixed.tissues <- union(f.side$tissue, t.side$tissue)
+t.side.pvals <- ldsc.reference %>% filter(Source %in% t.side$Source, tissue %in% mixed.tissues) %>% group_by(Source, tissue) %>% slice(which.min(Coefficient_P_value)) %>% 
+  ungroup() %>% select(Source, tissue, category, Coefficient_P_value)
+rbind(f.side, t.side.pvals)
+}
+
+
+factorHeatmapEnriched <- function(intab, t.side, fnum){
+  name.order <- unlist((intab %>% filter(Source == paste0("F", fnum)) %>% arrange(Coefficient_P_value))$tissue)
+  #if(length(name.order == 0))
+  #{
+  #    clust <- intab %>% select(Source, tissue, Coefficient_P_value) %>% pivot_wider(id_cols = c("Source", "tissue"), names_from = c("Source"), values_from = Coefficient_P_value)
+  #    o <- hclust(dist(clust[,-1]))$order
+  #    name.order <- as.character(unlist(clust$tissue)[o])
+  #}
+  intab$tissue <- factor(intab$tissue, level  = name.order)
+  #colors of those
+  #intab <- intab %>% arrange(tissue) %>% mutate('coloration' =  ifelse(tissue %in% t.side$tissue, "red", "black"))
+  coloration <- ifelse(name.order %in% t.side$tissue, "red", "black")
+  n <- c()
+  for(i in 1:nrow(intab))
+  {
+    if(intab$Source[i] %in% trait.studies)
+    {
+      n <- c(n, trait.names[which(trait.studies == x)])
+    } else
+    {
+      n <- c(n, paste0("F", fnum))
+    }
+  }
+  #n <- trait.names[unlist(lapply(intab$Source, function(x) which(trait.studies == x)))]
+  intab <- intab %>% mutate("TraitName" = n)
+  ggplot(intab, aes(x = TraitName, y = tissue, fill = -log10(Coefficient_P_value))) + geom_tile() + theme(axis.text.x = element_text(angle = 50, hjust = 1)) + scale_x_discrete(label = function(x) stringr::str_trunc(x, width  =27)) + scale_fill_gradient(low = "white", high = "red") + xlab("Trait") + ylab("Enriched Tissue") + ggtitle(paste0("Factor ", fnum, " Trait enrichments")) + theme(axis.text.y = element_text( color = coloration))
+}
+
+plotFactorTraitTissueEnrichments <- function(factor, thresh = 0.2, enrich.dat, factorization.enrichment)
+{
+  joined <- combineFactorAndTruth(factor, thresh, enrich.dat, factorization.enrichment)
+  t.side <- enrich.dat %>% filter(Factor == factor, NumTraitsInFactor > 1, NumSharedTissues > 0)
+  factorHeatmapEnriched(joined,t.side,factor)
+}
+
+
+```
+
+```{r, fig.width=10}
+#Process the trait enrichments
+f.to.t <- combineTraitAssessment(factorization, l)
+#note this only makes sense on factors with multiple enrichments
+#If factor not included, it had no enrichments at our designated FDR...
+#getting bugs on some of these
+unique(f.to.t %>% filter(NumTraitsInFactor > 1, NumSharedTissues != 0) %>% select(Factor))
+#plotFactorTraitTissueEnrichments(1, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(2, thresh = 0.2,  f.to.t, factorization.enrichment)
+plotFactorTraitTissueEnrichments(3, thresh = 0.2,  f.to.t, factorization.enrichment)
+plotFactorTraitTissueEnrichments(4, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(5, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(6, thresh = 0.2,  f.to.t, factorization.enrichment)
+plotFactorTraitTissueEnrichments(7, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(8, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(9, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(10, thresh = 0.2,  f.to.t, factorization.enrichment)
+plotFactorTraitTissueEnrichments(11, thresh = 0.2,  f.to.t, factorization.enrichment)
+plotFactorTraitTissueEnrichments(12, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(13, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(14, thresh = 0.2,  f.to.t, factorization.enrichment)
+#plotFactorTraitTissueEnrichments(15, thresh = 0.2,  f.to.t, factorization.enrichment)
+#
+```
+
+
+##9/9/21
+After meeting, wanting to modify code to allow for pairwise entrances, not just single. So modifying 
+IN DEVELOPMENTL: JUST GIVES OVERLAPS WITH ALL
+```{r}
+#@param nshared- specify the number of traits across which sharing must occur to count.
+#In the old version, this would have been all. 
+#A setting of nshared = 2 indicates that a tissue will count as shared if any 2 traits are enriched for it.
+#TODO FINISH
+factorTraitSharing <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1, nshared = 2)
+{
+  pr.list <- list()
+  factor.id <- paste0("F", f.ind)
+  #get the traits in the factor that are nonzero
+  relevant.traits <- which(factorization[,..f.ind] != 0)
+  #determine all of the tissues which are enriched for that factor and their FDR score. Pick only the highest marker per tissue.
+  factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
+    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
+  
+  all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
+  
+  #for n > 1:
+    #join the list of all of themat the threshold....
+  tissue.relevant.traits <- NULL
+  for(i in 1:length(relevant.traits)){
+    t = relevant.traits[i]
+   trait.id <- trait.studies[t]
+   alt.union <-NULL
+   for (j in relevant.traits[-i])
+   {
+     o <- trait.studies[j]
+     alt.ref.enrichment <- filterReference(ldsc.reference, o, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
+     alt.union <- union(alt.union, unlist(unique(alt.ref.enrichment$tissue)))
+   }
+   ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
+   overlap <- sum(unique(ref.enrichment$tissue) %in% alt.union)
+   if(overlap >= nshared)
+   {
+     tissue.relevant.traits <- rbind(tissue.relevant,traits, c(t, unique(ref.enrichment$tissue)[unique(ref.enrichment$tissue) %in% alt.union]))
+   }
+   #create a list containing all of the other ones
+  }
+}
+```
+Something more general- indicates the sharing overlap pairwise
+
+```{r}
+#for each tissue, add the number of traits enriched in it
+updateSharingDat <- function(sharing.dat, tissue, curr.list, trait,id)
+{
+  for(t in tissue)
+  {
+    if(t %in% curr.list)
+    {
+      sharing.dat[[t]]$count = sharing.dat[[t]]$count + 1
+      sharing.dat[[t]]$traits <- paste0(sharing.dat[[t]]$traits,",", trait)
+      sharing.dat[[t]]$trait.ids <- paste0(sharing.dat[[t]]$trait.ids,",", id)
+    }
+  }
+  return(sharing.dat)
+}
+
+#ISSUE: we are multi-counting...
+#Generates a matrix of sharing betweeen all traits in a factor
+factorTraitSharingMatrix <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
+{
+  factor.id <- paste0("F", f.ind)
+  relevant.traits <- which(factorization[,..f.ind] != 0)
+  all.tissues <- unique((factor.enrichment %>% arrange(tissue))$tissue)
+  
+  #for n > 1:
+    #join the list of all of themat the threshold....
+  tissue.relevant.traits <- NULL
+  shared <- matrix(NA, length(relevant.traits),length(relevant.traits))
+  sharingDat <- list()
+  #initialize list
+for(t in all.tissues)
+{
+  sharingDat[[t]] <- list()
+  sharingDat[[t]]$count <- 0
+  sharingDat[[t]]$traits <- ""
+  sharingDat[[t]]$trait.ids <- ""
+}
+  #For all the relevant traits for a given factor
+  for(i in 1:length(relevant.traits)){
+    t = relevant.traits[i]
+   trait.id <- trait.studies[t]
+   trait.name <- trait.names[t]
+   ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
+   for (j in relevant.traits[-i])
+   {
+     o <- trait.studies[j]
+     alt.index = which(relevant.traits == j)
+     alt.ref.enrichment <- filterReference(ldsc.reference, o, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
+     #shared overlap
+     shared[i,alt.index] <- length(intersect(unique(alt.ref.enrichment$tissue), unique(ref.enrichment$tissue)))
+   }
+   sharingDat <- updateSharingDat(sharingDat, all.tissues, unique(ref.enrichment$tissue), trait.name, trait.id)
+  }
+  #Finally, clean up the sharing dat into a nice table
+  df <- data.frame(do.call("rbind", sharingDat))
+  df$count <- as.integer(df$count)
+  df$tissue <- rownames(df)
+  df$traits <- gsub(x = df$traits,pattern = "^,", replacement = "")
+  df$trait.ids <- gsub(x =   df$trait.ids ,pattern = "^,", replacement = "")
+  ret_list <- list(); ret_list$matrix <- shared; ret_list$tissue.df <- df %>% arrange(-count)
+  return(ret_list)
+  
+}
+```
+Okay, let's test this...
+```{r}
+r <- factorTraitSharingMatrix(1, trait.studies, factorization, factorization.enrichment, ldsc.reference)
+r
+randCheck <- function(df, n)
+{
+  check.ids <- (unlist(strsplit(df[n,]$trait.ids, split = ",")))
+
+  t <- unique((ldsc.reference %>% filter(Source %in%  check.ids) %>% filter(tissue == df[n,]$tissue))$Source) %in% check.ids
+#Does this equal the number in R?
+  sum(t) == df[n,]$count
+}
+
+randCheck(r$tissue.df, 15)
+randCheck(r$tissue.df, 20)
+
+```
+Now,  getting a metric out of it
+```{r}
+n_include = 2
+all_f <- NULL
+ ret <- list()
+for(f in 1:ncol(factorization))
+{
+  print(f)
+  ret[[f]] <- list()
+  r <-  factorTraitSharingMatrix(f, trait.studies, factorization, factorization.enrichment, ldsc.reference)
+  #c(f, length(which(factorization[,..f.ind] != 0)), nrow(r$tissue.df %>% filter(count > 2)),max(r$tissue.df$count), r$tissue.df$tissue[which.max(r$tissue.df$count)]  )
+  
+  #I think doing a precison-recall kind of thing with this may be the way to go again....
+  tab <- r$tissue.df %>% filter(count >= n_include) %>% mutate("Factor" = paste0("F", f), "numTraits" = length(which(factorization[,..f] != 0)))
+  #TODO- PR curve on the factors
+  ref.panel <- as.integer(all.tissues %in% tab$tissue)
+  factor.enrichments <- factorization.enrichment %>% filter(Source == paste0("F", f)) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
+    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
+  print(factor.enrichments)
+   #the label is 1 if a trait is enriched for that tissue at FDR = answer_thres, 0 otherwise
+   est <- data.frame("names" = all.tissues, "labels" = ref.panel, 
+                     "probs" = factor.enrichments$class_prob )
+   
+   #get the area under the PR curve
+   pr.list <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
+             scores.class1=est[est$labels==0,]$probs,
+             curve=T)
+  all_f <- rbind(all_f, r$tissue.df %>% filter(count > 1) %>% mutate("Factor" = paste0("F", f), "numTraits" = length(which(factorization[,..f] != 0))))
+ ret[[f]]$pr <- pr.list
+}
+ ret$df <- all_f
+```
+All right, this seems cool. But the question is, how to use this to make a metric?
+Basic case, pairwise. Count the number of factors on average with pairwise overlaps != 0 (this will probably be full)
+More complex case: number of traits per factor with overlapping  tissue (!); this seems like a good way to do it... but this favors dense ones, since 
+
+### Random check on results
+```{r}
+plot(ret[[5]]$pr)
+c <- ret$df %>% filter(Factor == "F5")%>% select(Factor, count, numTraits, tissue, trait.ids, traits) %>% print()
+randCheck(c, 1)
+randCheck(c, 5)
+```
+Okay, looking good.
+Now, finally, how do we want to combine these scores?
+We have an average for each Factor.
+Let's do the good boxplot thing across methods.
+```{r}
+#store PR across factors
+out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "AUPR" = sapply(1:ncol(factorization), function(x) ret[[x]]$pr$auc.integral))
+```
+

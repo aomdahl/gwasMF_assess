@@ -1,0 +1,126 @@
+---
+title: "Sandbox: Use LDSC to assess factorization"
+output: html_notebook
+---
+```{r setup, echo  = FALSE}
+pacman::p_load(data.table, tidyr, dplyr, readr, ggplot2, stringr)
+source("./assessment_functions.R")
+  T="/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/"
+  args <- list()
+  args$factors <- paste0("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/factorization_data/beta_se_fixed_first900_900.factors.txt")
+  args$factors <- paste0("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/factorization_data/aug_28.ssvd.factors.txt")
+  args$ldsc_reference <-"/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/ldsc_results/seed2_thres0.9_h2-0.1/"
+  args$ldsc_dir <-paste0(T,"/results/beta_se_fixed_first900_900/ldsc_enrichment_Multi_tissue_chromatin/" ) 
+  args$trait.ids <- "/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.studies.tsv"
+  args$trait.names <- "/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.names.tsv"
+  args$n_overlap <- 2
+```
+
+
+### And putting it all together
+```{r}
+#Read in#Read in
+ldsc.reference <- readInLDSC(args$ldsc_reference)
+
+factorization.enrichment <- readInLDSC(args$ldsc_dir, type = "factorization enrichment")
+tissue.labels <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/ldsc_reference/finucane_2018_supp_table7.ashton.csv")
+
+factorization <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/factorization_data/PMA_91_2.3_8-11.factors.txt")
+
+trait.names <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.names.tsv", what = character())
+trait.studies <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.studies.tsv", what = character())
+```
+AFter today's meeting with Alexis, trying a new, simpler metric
+Just keep track of all the pairwise relationships between traits- if they share and if they don't. Track this
+
+```{r}
+fdr.thresh <- 0.05
+sharing <- matrix(0, length(trait.names), length(trait.names))
+for(t in trait.studies)
+{
+  curr.t <- unique((ldsc.reference %>% filter(Source == t, within_trait_FDR < fdr.thresh))$tissue)
+  if(length(curr.t) == 0) #no matches can occur
+  {
+    next
+  }
+  matches <-ldsc.reference %>% filter(within_trait_FDR < fdr.thresh, tissue %in% curr.t) %>% group_by(Source) %>% 
+    slice(which.min(within_trait_FDR)) %>% ungroup()
+  #^ we allow for matchin with onese self, makes downstream easier. Just omit it.
+  curr.i <- which(t == trait.studies)
+  match.i <- sapply(matches$Source, function(j) which(j == trait.studies))
+  sharing[curr.i, match.i] <- 1
+}
+print(sharing)
+```
+Look at the natural clustering of this....
+```{r}
+pca <- prcomp(x = t(sharing[-c(36,41,54),]), center = TRUE, scale. = TRUE)
+plot(pca)
+which(colSums(sharing) == 0)
+names(pca)
+plot(pca$x[,1], pca$x[,2])
+```
+Hierarchical clustering...
+```{r, fig.width=15}
+library(dendextend)
+rownames(sharing) <- trait.names
+h <- hclust(dist(sharing))
+dend <- as.dendrogram(h)
+labels_colors(dend) <- NULL
+dend2 <- color_labels(dend, k = 15)
+dend2 <- set(dend2, "labels_cex", 1)
+par(mar = c(1,1,1,13))
+plot(dend2, horiz = TRUE)
+```
+
+Interesting. Some of these groupings make sense, some do not.
+This may not be the most meaningful way to detect trait similarity, but can help us.
+Question- which traits have the least overlap? which have the most?
+```{r}
+#smallest matching guy?
+trait.names[rowSums(sharing)==0]
+trait.names[which.max(rowSums(sharing))]
+
+```
+
+Now, calculate a score and a confusion matrix for each factor:
+```{r}
+check.list <- apply(factorization, 2, function(x) which(x != 0))
+#These all go together: this assumes (j-1)*j/2 total associations
+#True number would by sum of matrix - j/2
+true <- sharing[check.list[[1]], check.list[[1]]] #what the actual relationship between these tissues is
+true[lower.tri(pred, diag = TRUE)] <- NA #only want the upper triangle
+score <- sum(true == 1,na.rm = TRUE) - sum(true == 0, na.rm = TRUE)
+simpleScore <- function(vect, m)
+{
+  true <- m[vect,vect] #what the actual relationship between these tissues is
+  true[lower.tri(true, diag = TRUE)] <- NA #only want the upper triangle
+  #assume our guess is all in here should be one
+  sum(true == 1,na.rm = TRUE) - sum(true == 0, na.rm = TRUE)
+  #The ones we guessed right in the group - the ones we didn't
+}
+#I think maybe this is the way to go?
+simpleNorm <- function(vect, m)
+{
+  true <- m[vect,vect] #what the actual relationship between these tissues is
+  t <- true[lower.tri(true, diag = FALSE)] #only want the upper triangle
+  all.ones <- matrix(1, length(vect), length(vect))
+  p <- all.ones[lower.tri(all.ones, diag = FALSE)]
+  sqrt(sum((t-p)^2))
+  #The ones we guessed right in the group vs the ones we didn't
+}
+
+```
+Putting it all together
+```{r}
+fact.scores <- sapply(check.list, function(v) simpleScore(v, sharing))
+fact.dist <- sapply(check.list, function(v) simpleNorm(v, sharing))
+plotFactors(factorization, trait.names, title = "refresh",cluster = TRUE)
+plot(fact.scores)
+plot(fact.dist)
+
+```
+
+Confusion matrix?
+This is a bit harder...
+
