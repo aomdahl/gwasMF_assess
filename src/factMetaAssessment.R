@@ -1,7 +1,6 @@
 ####### Meta-analyze the factorization metrics
 ####### Made by Ashton Omdahl, Battle Lab, Sept 2021
 rm(list = ls()) #clear the environment
-install.packages("ggsignif")
 pacman::p_load(data.table, tidyr, dplyr, readr, ggplot2, stringr, Xmisc, PRROC, ROCR,svMisc, stats, cowplot, ggsignif)
 #######functions
 
@@ -16,7 +15,7 @@ hackyAssignMethod <- function(handle)
 {
   if(grepl("PMA", handle)){return("PMA")
   } else if(grepl("sPCA", handle) | grepl("sparsePCA", handle)) {return("sparsePCA")
-  } else if(grepl("ssvd", handle)) {return("ssvd")
+  } else if(grepl("ssvd", handle) || grepl("sSVD", handle)) {return("ssvd")
   } else if(grepl("flash", handle)) {return("flashR")
   } else if(grepl("B_SE", handle) | grepl("beta_se", handle)) {return("gwasMF")
   } else if(grepl("backfit", handle)) {return("flashR")
@@ -38,9 +37,9 @@ handles <- scan(args$factorization_handles, what = character())
 #Overlap measures
 n_overlaps <- do.call("rbind", lapply(handles, function(f) fread(paste0(paste0(args$results_dir, f), "/factor_true_tissue_overlaps.2.txt")) %>% mutate("Factorization" = f))) %>% mutate("method" = factor(sapply(.$Factorization, hackyAssignMethod))) %>% arrange(method)
 
-with.nas <- data.frame("Factorization" = unique((n_overlaps %>% filter(is.na(AUPR)))$Factorization), "AUPR" = 1)
+#with.nas <- data.frame("Factorization" = unique((n_overlaps %>% filter(is.na(AUPR)))$Factorization), "AUPR" = 1)
 
-ggplot(data = n_overlaps, aes(x = reorder(Factorization, as.integer(method)), y = AUPR, fill = method)) + geom_boxplot() + theme_minimal(17) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("AUPR across factors") + 
+ggplot(data = n_overlaps, aes(x = reorder(Factorization, as.integer(method)), y = AUPR, fill = method)) + geom_boxplot() + theme_minimal(17) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab("AUPR across factors") #+ 
   geom_text(data = with.nas, aes(label = "*", y = AUPR, x = Factorization),inherit.aes=FALSE, color = "red")
 
 #simple measures
@@ -65,4 +64,5 @@ sums.overall <- simple %>% group_by(Factorization, method) %>% summarize("tot" =
 ggplot(data = sums.overall, aes(x = Factorization, y = tot, fill = method)) + geom_bar(stat = "identity") + 
   theme_minimal(15) + ggtitle("Overall score (summed)") + theme(axis.text.x = element_text(angle = 90))
 
-#TODO- sum over all facctors somehow?
+#make a boxplot YOU NINNY
+ggplot(data = simple, aes(x = reorder(Factorization, as.integer(method)), y = Score, fill = method)) + geom_boxplot() + theme_minimal(15) + ggtitle("Scores across factors by method") + theme(axis.text.x = element_text(angle = 90)) + xlab("Factorization method")
