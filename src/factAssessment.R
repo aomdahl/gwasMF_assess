@@ -446,17 +446,15 @@ parser$add_argument("--ldsc_dir", type = 'character', default = "/work-zfs/abatt
 parser$add_argument("--trait.ids", type = 'character', default = "/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.studies.tsv", help = "Where are the ids for the traits?")
 parser$add_argument("--trait.names", type = 'character', default = "/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/trait_selections/seed2_thresh0.9_h2-0.1.names.tsv", help = "Where are the names for the traits?")
 parser$add_argument("--n_overlap", type = 'integer', default = 2, help = "overlap in tissues.")
-parser$add_argument("--all", type = 'logical', default = FALSE, help = "Run all analysis metrics.")
-parser$add_argument("--trait_specific", type = 'logical', default = FALSE, help = "Run trait_specific analysis metrics.")
-parser$add_argument("--factor_specific", type = 'logical', default = FALSE, help = "Run factor-specific analysis metrics.")
-parser$add_argument("--simple", type = 'logical', default = FALSE, help = "Run simple tests.")
+parser$add_argument("--all", type = 'logical', default = FALSE, action='store_true', help = "Run all analysis metrics.")
+parser$add_argument("--trait_specific", type = 'logical', default = FALSE, action='store_true', help = "Run trait_specific analysis metrics.")
+parser$add_argument("--factor_specific", type = 'logical', default = FALSE, action='store_true', help = "Run factor-specific analysis metrics.")
+parser$add_argument("--simple", type = 'logical', default = FALSE, help = "Run simple tests.",action='store_true')
 parser$add_argument("--fdr.thresh", type = 'double', default = 0.05, help = "True value cutoff.")
-
-parser$add_argument("--overlap_test", type = 'logical', default = FALSE, help = "Run overlap test.")
-parser$add_argument('--help',type='logical',action='store_true',help='Print the help page')
+parser$add_argument("--overlap_test", type = 'logical', action='store_true', default = FALSE, help = "Run overlap test.")
+parser$add_argument('--help',type='logical',action='store_true',help='Print the help page', default = FALSE)
 parser$helpme()
 args <- parser$get_args()
-
 if(FALSE)
 {
   T="/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/"
@@ -488,7 +486,7 @@ trait.studies <- scan("/work-zfs/abattle4/ashton/snp_networks/gwas_decomp_ldsc/t
 K <- ncol(factorization)
 ntraits <- nrow(factorization)
 res <- matrix(NA, ntraits, 2)
-
+print("Information loaded")
 ################### TRAIT-specific metrics ###################
 if(args$all || args$trait_specific)
 {
