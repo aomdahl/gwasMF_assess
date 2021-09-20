@@ -2,6 +2,7 @@
 ####### Made by Ashton Omdahl, Battle Lab, Aug 2021
 rm(list = ls()) #clear the environment
 pacman::p_load(data.table, tidyr, dplyr, readr, ggplot2, stringr, Xmisc, PRROC, ROCR,svMisc, stats, cowplot)
+source("/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/src/assessment_functions.R")
 #######functions
 
 #plot the pr curve using existing package
@@ -219,6 +220,27 @@ factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorizatio
   return(back)
 }
 
+
+#generate a null pvalue for
+factorSpecificSharingNull <- function(null.factor.traits, ldsc.reference, answer_thres)
+{
+  #get the traits in the factor that are nonzero
+  relevant.traits <- null.factor.traits #indices non-zero
+  all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
+  
+  #FOR EACH of those traits, track which enrichments shared by all (intersect)
+    t <- trait.studies[null.factor.traits]
+    options(dplyr.summarise.inform = FALSE)
+    tissue.counts <- ldsc.reference %>% filter(within_trait_FDR < answer_thres, Source %in% t) %>% 
+      group_by(Source, tissue) %>% slice(1) %>% ungroup() %>% group_by(tissue) %>% 
+      summarize("tiss_freq" = n()) %>% filter(tiss_freq >= length(null.factor.traits))
+  #faster way....
+#return(length(tissue.relevant.traits))
+return(nrow(tissue.counts))
+}
+
+
+#Function determines performance by looking at tissues shared by all the traits in a factor.
 #@PARAM f.ind: the index of the factor we are looking at
 #@param trait.studies: the list of trait study identifiers
 #@param factorization: the actual factorization matrix
@@ -227,17 +249,13 @@ factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorizatio
 #@param answer_thresh: the threshold at which enrichments are counted as true
 #Note that here we depart from previous method by accounting for within-"trait" FDR (i.e. across a single factor), not across all factors.
 #This differs from the above method in that we look at perf
-factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1, n.perm = 100)
 {
   pr.list <- list()
   factor.id <- paste0("F", f.ind)
   #get the traits in the factor that are nonzero
   relevant.traits <- which(factorization[,..f.ind] != 0)
-  #determine all of the tissues which are enriched for that factor and their FDR score. Pick only the highest marker per tissue.
-  factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
-    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
-  
-  all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
+  all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
   
   #FOR EACH of those traits, track which enrichments shared by all (intersect)
   for(i in 1:length(relevant.traits)){
@@ -247,26 +265,37 @@ factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factor
     if(i == 1)
     {
       tissue.relevant.traits <- unique(ref.enrichment$tissue)
-      #print(tissue.relevant.traits)
     } else  {
       tissue.relevant.traits <- intersect(tissue.relevant.traits,unique(ref.enrichment$tissue))
-      #print(tissue.relevant.traits)
     }
   }
   ref.panel <- as.integer(all.tissues %in% tissue.relevant.traits)
+  
+  #blocked out many things...
   #the label is 1 if a trait is enriched for that tissue at FDR = answer_thres, 0 otherwise
-  est <- data.frame("names" = all.tissues, "labels" = ref.panel, 
-                    "probs" = factor.enrichments$class_prob )
+  #est <- data.frame("names" = all.tissues, "labels" = ref.panel, 
+  #                  "probs" = factor.enrichments$class_prob )
   
   #get the area under the PR curve
-  pr.list <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
-                             scores.class1=est[est$labels==0,]$probs,
-                             curve=T)
+  #pr.list <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
+  #                           scores.class1=est[est$labels==0,]$probs,
+  #                           curve=TRUE)
+  
+  #generate a null
+ 
+  nulls <- matrix(NA, n.perm)
+
+  for(i in 1:n.perm)
+  {
+    nulls[i] <- factorSpecificSharingNull(sample(1:nrow(factorization), length(relevant.traits)), ldsc.reference, answer_thres)
+    #if( i%% 10 ==0) {print(i)}
+  }
   back <- list()
   back$FactorTraits <- relevant.traits
-  back$aupr <- pr.list
-  back$sharedHits <- sum(est$labels)
+  #back$aupr <- pr.list
+  back$sharedHits <- length(tissue.relevant.traits)
   back$sharedTissues <- tissue.relevant.traits
+  back$pval <- sum(nulls >= length(relevant.traits)) / n.perm
   return(back)
 }
 
@@ -535,68 +564,63 @@ if(args$all || args$trait_specific)
 #AUPR per factor
 if(args$all || args$factor_specific)
 {
-  
-  message("Calculating the AUPR per factor (weighted average)....")
-  if(FALSE) #this was the old way of doing it, now have a better way..
-  {
-    factor.avgs <- sapply(1:K, function(i) weighted.mean(x = res[,1], w = unlist(factorization[,..i]^2)))
-    png(paste0(args$output, "/pr_per_factor.png") )
-    barplot(factor.avgs, names.arg = 1:K, ylab = "Factors", xlab = "Average AUPR", horiz = TRUE)
-    dev.off()
-    by.factor <- data.frame("Factor" = paste0("F", 1:K), "Weighted_avg" = factor.avgs)
-    write_tsv(x = by.factor, file= paste0(args$output, "/per_factor_aupr.tsv"))
-  }
-  
-  #across each factor...
-  res <- NULL
-  means <- c()
-  for(i in 1:ncol(factorization))
-  {
-    r <- factorSpecificAUPR(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
-    n <- rep(paste0("F", i), length(r$aupr))
-    ret <- cbind(n, as.numeric(r$aupr), as.numeric(r$weights))
-    res <- rbind(res, ret)
-    means <- c(means, r$wmean)
-  }
-  #compile the results into tables 
-  rest <- data.frame(res)
-  names(rest) <- c("factor", "aupr", "weight")
-  rest$aupr <- as.numeric(as.character(rest$aupr))
-  rest$weight <- as.numeric(as.character(rest$weight))
-  rest$factor <- factor(rest$factor, levels = paste0("F", 1:ncol(factorization)))
-  means <- data.frame("factor" = paste0("F", 1:ncol(factorization)), "wmean" = means) %>% add_row("factor" = "Average", "wmean" = mean(means,na.rm = TRUE))
-  #plot
-  p <- ggplot(rest, aes(x = factor, y = aupr, weight = weight)) + 
-    geom_boxplot() + 
-    geom_point(data=means,aes(x=factor,y=wmean), color = "coral", size = 3,shape = 4, inherit.aes=FALSE) + 
-    theme_minimal(18) + xlab("Factor") + ylab("Weighted AUPR")
-  
-  ggsave(filename = paste0(args$output, "/pr_boxplot_factors.png"), plot = p, width = 10)
-  #also a basic plot of the means
-  png(paste0(args$output, "/pr_weightedmeans_factors.png") )
-  barplot(names.arg = unlist(means$factor), height = means$wmean,col = "skyblue", xlab = "Factor", ylab = "weighted mean")
-  dev.off() 
-  #save the weighted means
-  #means <- data.frame("factor" = paste0("F", 1:ncol(factorization)), "wmean" = means)
-  write_tsv(x = means, file = paste0(args$output, "/pr_weightedmeans_factors.txt"))
-  
   #AUPR per factor by sharing
+  #####HERE 
   #Number of shared enrichments within a factor..... (how good is the grouping?)
   l <- list()
   for(i in 1:ncol(factorization))
   {
     l[[i]] <- factorSpecificAUPRShared(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+    print(i)
   } 
   num.factors.with.enrichemnts <- sum(sapply(1:length(l), function(x) l[[x]]$sharedHits > 0))
-  fileConn<-file(paste0(args$output, "/factor_true_tissue_overlaps.ALL.txt"))
-  writeLines(paste0("Number of factors for which ALL grouped traits shared a detected overlapping tissue association: ", num.factors.with.enrichemnts), fileConn)
-  close(fileConn)
+  out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "SharedTissues" = sapply(l, function(x) x$sharedHits), "pval(100)" = sapply(l, function(x) x$pval))
+  write_tsv(out.df, file = paste0(args$output, "/factor_true_tissue_overlaps.ALL.txt"))
   
+  if(FALSE) #me being really lazy here...
+  {
+    message("Calculating the AUPR per factor (weighted average)....")
+    #across each factor...
+    res <- NULL
+    means <- c()
+    for(i in 1:ncol(factorization))
+    {
+      r <- factorSpecificAUPR(i, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
+      n <- rep(paste0("F", i), length(r$aupr))
+      ret <- cbind(n, as.numeric(r$aupr), as.numeric(r$weights))
+      res <- rbind(res, ret)
+      means <- c(means, r$wmean)
+    }
+    #compile the results into tables 
+    rest <- data.frame(res)
+    names(rest) <- c("factor", "aupr", "weight")
+    rest$aupr <- as.numeric(as.character(rest$aupr))
+    rest$weight <- as.numeric(as.character(rest$weight))
+    rest$factor <- factor(rest$factor, levels = paste0("F", 1:ncol(factorization)))
+    means <- data.frame("factor" = paste0("F", 1:ncol(factorization)), "wmean" = means) %>% add_row("factor" = "Average", "wmean" = mean(means,na.rm = TRUE))
+    #plot
+    p <- ggplot(rest, aes(x = factor, y = aupr, weight = weight)) + 
+      geom_boxplot() + 
+      geom_point(data=means,aes(x=factor,y=wmean), color = "coral", size = 3,shape = 4, inherit.aes=FALSE) + 
+      theme_minimal(18) + xlab("Factor") + ylab("Weighted AUPR")
+    
+    ggsave(filename = paste0(args$output, "/pr_boxplot_factors.png"), plot = p, width = 10)
+    #also a basic plot of the means
+    png(paste0(args$output, "/pr_weightedmeans_factors.png") )
+    barplot(names.arg = unlist(means$factor), height = means$wmean,col = "skyblue", xlab = "Factor", ylab = "weighted mean")
+    dev.off() 
+    #save the weighted means
+    #means <- data.frame("factor" = paste0("F", 1:ncol(factorization)), "wmean" = means)
+    write_tsv(x = means, file = paste0(args$output, "/pr_weightedmeans_factors.txt"))
+    
+    
     #this looks at overlapping enrichments between factors, and counts those tissues as true
-  message(paste0("Getting the AUPR by overlap, overlap is ", args$n_overlap))
-  factor.aupr <- processFactorAUPRByOverlap(factorization, trait.studies, factorization.enrichment, ldsc.reference, n_include = args$n_overlap)
-  out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "AUPR" = sapply(1:ncol(factorization), function(x) factor.aupr[[x]]$pr$auc.integral))
-  write_tsv(x = out.df, file = paste0(args$output, "/factor_true_tissue_overlaps.", args$n_overlap, ".txt"))
+    message(paste0("Getting the AUPR by overlap, overlap is ", args$n_overlap))
+    factor.aupr <- processFactorAUPRByOverlap(factorization, trait.studies, factorization.enrichment, ldsc.reference, n_include = args$n_overlap)
+    out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "AUPR" = sapply(1:ncol(factorization), function(x) factor.aupr[[x]]$pr$auc.integral))
+    write_tsv(x = out.df, file = paste0(args$output, "/factor_true_tissue_overlaps.", args$n_overlap, ".txt"))
+  }
+  
 }
 
 if(args$overlap_test)
@@ -617,7 +641,27 @@ if(args$all || args$simple)
   fact.score.scaling <- sapply(check.list, function(v) choose(length(v), 2))
   fact.dist <- sapply(check.list, function(v) simpleNorm(v, sharing))
   out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "Score" = unlist(fact.scores), "Dist" = unlist(fact.dist), "ScaledScore" = unlist(fact.scores)/unlist(fact.score.scaling), "ScaledAlt" = unlist(fact.scores)/sapply(check.list, length))
+  
+  
+  #null background counting.
+  #select some random grouping of traits with the same number as the factor
+  n.perm = 10000
+  null.scores <- matrix(NA,n.perm, length(check.list))
+  for(i in 1:n.perm)
+  {
+    null.scores[i,] <- sapply(check.list, function(v) simpleScore(sample(1:length(trait.studies), length(v)), sharing))
+  }
+  pval = rowSums(apply(null.scores, 1, function(x) x >= fact.scores))/n.perm
+  out.df$Score_pval <- pval
+  out.df$Factor_sparsity <- apply(factorization, 2, function(x) sum(abs(x) <=  1e-4) / length(x)) #note this is confusing, counts number of about-zero entries, so higher --> more sparsity
+  
   write_tsv(x = out.df, file = paste0(args$output, "/factor_simple_scores.txt"))
+  #I am suspicious that denser factors are disfavored in having low p-values- like the null isn't fair.
+  #plot(apply(factorization, 2, function(x) sum(x != 0)), pval)
+  #check the score
+  #repeat that a bunch of times
+  #get a p-value
+  
 }
 #some debugging things.....
 #suspects <- c("30020_irnt", "30070_irnt", "30010_irnt")
