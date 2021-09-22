@@ -205,7 +205,7 @@ factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorizatio
   
   return(back)
 }
-
+#Function determines performance by looking at tissues shared by all the traits in a factor.
 #@PARAM f.ind: the index of the factor we are looking at
 #@param trait.studies: the list of trait study identifiers
 #@param factorization: the actual factorization matrix
@@ -214,17 +214,14 @@ factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorizatio
 #@param answer_thresh: the threshold at which enrichments are counted as true
 #Note that here we depart from previous method by accounting for within-"trait" FDR (i.e. across a single factor), not across all factors.
 #This differs from the above method in that we look at perf
-factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.1)
+factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, sparsity.threshold, answer_thres = 0.1, n.perm = 100,)
 {
   pr.list <- list()
   factor.id <- paste0("F", f.ind)
   #get the traits in the factor that are nonzero
-  relevant.traits <- which(factorization[,..f.ind] != 0)
-  #determine all of the tissues which are enriched for that factor and their FDR score. Pick only the highest marker per tissue.
-  factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
-    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
   
-  all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
+  relevant.traits <- which(abs(factorization[,..f.ind]) > sparsity.threshold)
+  all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
   
   #FOR EACH of those traits, track which enrichments shared by all (intersect)
   for(i in 1:length(relevant.traits)){
@@ -234,28 +231,38 @@ factorSpecificAUPRShared <- function(f.ind, trait.studies, factorization, factor
     if(i == 1)
     {
       tissue.relevant.traits <- unique(ref.enrichment$tissue)
-      #print(tissue.relevant.traits)
     } else  {
       tissue.relevant.traits <- intersect(tissue.relevant.traits,unique(ref.enrichment$tissue))
-      #print(tissue.relevant.traits)
     }
   }
   ref.panel <- as.integer(all.tissues %in% tissue.relevant.traits)
+  
+  #No longer interested in AUPR- doesn't quite represent things well.
   #the label is 1 if a trait is enriched for that tissue at FDR = answer_thres, 0 otherwise
-  est <- data.frame("names" = all.tissues, "labels" = ref.panel, 
-                    "probs" = factor.enrichments$class_prob )
+  #est <- data.frame("names" = all.tissues, "labels" = ref.panel, 
+  #                  "probs" = factor.enrichments$class_prob )
   
   #get the area under the PR curve
-  pr.list <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
-                             scores.class1=est[est$labels==0,]$probs,
-                             curve=T)
+  #pr.list <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
+  #                           scores.class1=est[est$labels==0,]$probs,
+  #                           curve=TRUE)
+  
+  #generate a null instead
+  nulls <- matrix(NA, n.perm)
+  
+  for(i in 1:n.perm)
+  {
+    nulls[i] <- factorSpecificSharingNull(sample(1:nrow(factorization), length(relevant.traits)), ldsc.reference, answer_thres)
+  }
   back <- list()
   back$FactorTraits <- relevant.traits
-  back$aupr <- pr.list
-  back$sharedHits <- sum(est$labels)
+  #back$aupr <- pr.list
+  back$sharedHits <- length(tissue.relevant.traits)
   back$sharedTissues <- tissue.relevant.traits
+  back$pval <- sum(nulls >= length(relevant.traits)) / n.perm
   return(back)
 }
+
 
 
 
@@ -275,6 +282,8 @@ updateSharingDat <- function(sharing.dat, tissue, curr.list, trait,id)
   }
   return(sharing.dat)
 }
+
+
 
 #Count the tissue sharing at a specific threshold for a specific factor
 #@return ret$matrix: matrix containing the pairwise count of overlapping tissues between traits in a factor
@@ -380,4 +389,82 @@ processFactorAUPRByOverlap <- function(factorization, trait.studies, factorizati
   }
   ret$df <- all_f
   return(ret)
+}
+
+#generate a null pvalue for the strict overlap requirement
+#@param null.factor.traits: randomly selected trait indices to score on.
+factorSpecificSharingNull <- function(null.factor.traits, ldsc.reference, answer_thres)
+{
+  #get the traits in the factor that are nonzero
+  relevant.traits <- null.factor.traits #indices non-zero
+  all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
+  
+  #FOR EACH of those traits, track which enrichments shared by all (intersect)
+  t <- trait.studies[null.factor.traits]
+  options(dplyr.summarise.inform = FALSE)
+  tissue.counts <- ldsc.reference %>% filter(within_trait_FDR < answer_thres, Source %in% t) %>% 
+    group_by(Source, tissue) %>% slice(1) %>% ungroup() %>% group_by(tissue) %>% 
+    summarize("tiss_freq" = n()) %>% filter(tiss_freq >= length(null.factor.traits))
+  #faster way....
+  #return(length(tissue.relevant.traits))
+  return(nrow(tissue.counts))
+}
+
+
+
+###Simple helpers
+#Create a binary matrix indicating if traits share some tissue at a set fdr.thresh
+tissueSharingMatrix <- function(fdr.thresh, trait.studies, ldsc.reference)
+{
+  sharing <- matrix(0, length(trait.studies), length(trait.studies))
+  for(t in trait.studies)
+  {
+    curr.t <- unique((ldsc.reference %>% filter(Source == t, within_trait_FDR < fdr.thresh))$tissue)
+    if(length(curr.t) == 0) #no matches can occur
+    {
+      next
+    }
+    matches <-ldsc.reference %>% filter(within_trait_FDR < fdr.thresh, tissue %in% curr.t) %>% group_by(Source) %>% 
+      slice(which.min(within_trait_FDR)) %>% ungroup()
+    #^ we allow for matchin with onese self, makes downstream easier. Just omit it.
+    curr.i <- which(t == trait.studies)
+    match.i <- sapply(matches$Source, function(j) which(j == trait.studies))
+    sharing[curr.i, match.i] <- 1
+  }
+  return(sharing)
+}
+#@param vect: the indices of the traits in the group
+#@param m: the matrix of pairwise tissue sharing across traits
+simpleScore <- function(vect, m)
+{
+  true <- m[vect,vect] #what the actual relationship between these tissues is
+  true[lower.tri(true, diag = TRUE)] <- NA #only want the upper triangle
+  #assume our guess is all in here should be one
+  sum(true == 1,na.rm = TRUE) - sum(true == 0, na.rm = TRUE)
+  #The ones we guessed right in the group - the ones we didn't
+}
+#I think maybe this is the way to go?
+simpleNorm <- function(vect, m)
+{
+  true <- m[vect,vect] #what the actual relationship between these tissues is
+  t <- true[lower.tri(true, diag = FALSE)] #only want the upper triangle
+  all.ones <- matrix(1, length(vect), length(vect))
+  p <- all.ones[lower.tri(all.ones, diag = FALSE)]
+  sqrt(sum((t-p)^2))
+  #The ones we guessed right in the group vs the ones we didn't
+}
+
+#calculate pvalue for simple scores
+#@params n.perm: number of permutations to run
+#@param check.list: the traits assigned in each factor
+#@param traits.studies: trait id list
+#@param sharing: reference of true tissue sharing across traits.
+calcSimplePval <- function(n.perm, check.list, trait.studies, sharing)
+{
+  null.scores <- matrix(NA,n.perm, length(check.list))
+  for(i in 1:n.perm)
+  {
+    null.scores[i,] <- sapply(check.list, function(v) simpleScore(sample(1:length(trait.studies), length(v)), sharing))
+  }
+  owSums(apply(null.scores, 1, function(x) x >= fact.scores))/n.perm
 }
