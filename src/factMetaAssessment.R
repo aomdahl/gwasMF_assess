@@ -72,7 +72,7 @@ if(args$test_type == "celltype")
   
   #plot of pvals vs density
   res <- lm(Score_pval ~ Factor_sparsity, data = simple)
-  ggplot(data = simple, aes(x = Factor_sparsity, y = Score_pval)) + geom_point() +geom_smooth(method = "lm") +
+  ggplot(data = simple, aes(x = Factor_sparsity, y = Score_pval, color = method)) + geom_point() +geom_smooth(method = "lm",aes(group =1)) +
     theme_minimal(15) + annotate(geom = "text",x = 0.75, y = 0.5, label = paste0("p = ", round(summary(res)$coefficients[8],digits = 3))) + geom_hline(yintercept = 0.05, color = "red", linetype = 'dashed')
   hist(simple$Score_pval, main = "Distribution of p-values", xlab = "Score pvalue", breaks = 30)
 }
@@ -84,6 +84,7 @@ if(args$test_type == "general")
   str_split(fs, pattern = "\\.")
   ggplot(n_frob, aes(x = Method, y = Frobenius_norm, fill = Type)) + geom_bar(stat = "identity") + theme_minimal(15) + theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ggtitle("Reconstruction error (frobenius norm)")
   ggsave(paste0(args$output, "/frob.png"))
+  
   #sparsity and pve
   sp.pve <- list.files(args$results_dir, pattern = "*pve.txt")
   n_sp <- do.call("rbind", c(lapply(sp.pve, function(f) fread(paste0(args$results_dir,"/", f)) %>% mutate("Method" = str_split(f, pattern = "\\.")[[1]][1])), fill = TRUE))

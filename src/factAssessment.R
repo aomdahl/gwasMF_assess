@@ -5,221 +5,6 @@ pacman::p_load(data.table, tidyr, dplyr, readr, ggplot2, stringr, Xmisc, PRROC, 
 source("/work-zfs/abattle4/ashton/snp_networks/scratch/ldsc_all_traits/src/assessment_functions.R")
 #######functions
 
-#plot the pr curve using existing package
-#@param trait.id: identifier of the trait you want to lookup
-#@param factorization: the actual factorization. Used to select which factors are relevant
-#@param factorization.enrichment: the data listing 
-areaPRPlot <- function(ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
-{
-  trait.id <- trait.studies[ind]
-  #Gets all the info for the traits
-  fact.enrichment <- filterFactorization(trait.index = ind, fact.matrix = factorization, fact.enrichment = factorization.enrichment, FDR = 1, overall_FDR = TRUE) #give me all the hits
-  
-  #get the correct answers
-  all.tissues <- unique((ldsc.reference %>% arrange(tissue))$tissue)
-  ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) 
-  
-  #Check for some weird edge cases...
-  if(nrow(fact.enrichment) == 0) #we have an empty factor, no enrichments in the factor
-  {
-    #est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = runif(length(all.tissues), 0, 0.05) )
-    psuedo <- list()
-    psuedo$auc.integral <- 0
-    psuedo$auc.davis.goadrich <- 0
-    return(psuedo)
-    
-  }else{ #we do have something..
-    answer.fact <-  fact.enrichment %>% group_by(tissue) %>% slice(which.min(overall_FDR)) %>% mutate("class_prob" = 1-overall_FDR) %>% ungroup() %>% arrange(tissue)
-  }
-  
-  #another bunch of edge cases, this time in ref enrichment
-  if(!any(all.tissues %in% ref.enrichment$tissue)) #this trait had no enrichments in LDSC
-  {
-    ref.panel <- rep(0, length(all.tissues)) #this is the case when its NA....
-    est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = answer.fact$class_prob ) %>% add_row(names = "extra", labels = 1, probs = 0.5)
-  }else {
-    ref.panel <- as.integer(all.tissues %in% ref.enrichment$tissue)
-  est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = answer.fact$class_prob )  #TODO: evaluate this. is this correct?
-  }
-
-  #full list of categoryie
-  back <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
-                          scores.class1=est[est$labels==0,]$probs,
-                          curve=T)
-  return(back)
-}
-
-
-#Read in the LDSC output directory
-#currently being lazy and just assuming reference same for all...
-readInLDSC <- function(dir, ext = ".cell_type_results.txt", type = "ldsc reference")
-{
-  file.list <- list.files(dir, pattern = ext)
-  
-  if(type == "ldsc reference")
-  {
-    all <- lapply(file.list, function(x) fread(paste0(dir, x)) %>% arrange("Name") %>% mutate("Source" = gsub(x = x,pattern = ".cell_type_results.txt", replacement = "")))
-  }else
-  {
-    all <- lapply(file.list, function(x) fread(paste0(dir, x)) %>% arrange("Name") %>% mutate("Source" = str_extract(str_split(x, pattern = "\\.")[[1]][1], pattern = "F\\d+"))) 
-  }
-  todos <- plyr::rbind.fill(all) %>% mutate("-log10(P)" =-log10(Coefficient_P_value))
-  labels <- fread("/work-zfs/abattle4/ashton/snp_networks/custom_l1_factorization/ldsc_reference/finucane_2018_supp_table7.ashton.csv")
-  #Kyped the following code from Rebecca Keener on 6/2/2021
-  yes<-subset(labels, labels$entex=="Yes")
-  yes$Name<-paste(yes$tissue, "_ENTEX__", yes$mark, sep="")
-  no<-subset(labels, labels$entex=="No")
-  no$Name<-paste(no$tissue, no$mark, sep="__")
-  labels<-rbind(yes, no)
-  substitution_regex = "__"
-  substitution_regex_to = "-"
-  
-  ret <- left_join(todos, labels, by  = "Name") %>% arrange(new_category) %>% select(-entex) %>% group_by(Source) %>% 
-    mutate("within_trait_FDR" = p.adjust(Coefficient_P_value, method = "fdr")) %>% ungroup()
-  ret$overall_FDR <- p.adjust(ret$Coefficient_P_value, method = "fdr")
-  ret
-}
-#Filter the reference data from LDSC
-#@param ldsc.ref: the read in ldsc reference information
-#@param trait.id: identifier for the trait
-#@param FDR: the FDR of what we accept as an answer
-#@param overall_FDR: if we use the trait-specific FDR or overall FDR. Trait specific is default, since examining only one trait at a time.
-filterReference <- function(ldsc.ref, trait.id, FDR = 0.01, overall_FDR = FALSE)
-{
-  n <-  ldsc.ref %>% filter(Source == trait.id)
-  if(overall_FDR)
-  {
-    n %>% ungroup() %>% filter(overall_FDR < FDR) %>% select(tissue, mark, new_category)
-    
-  } else{
-    n %>% ungroup() %>% filter(within_trait_FDR < FDR) %>% select(tissue, mark, new_category)
-  }
-}
-
-#Filter the LDSC analysis of the factorization
-#@param trait.index: the index of the trait of interest
-#@param fact.matrix: the matrix of factorization information
-#@param FDR: fact.enrichmentL: the table of LDSC enrichment for it.
-#@param overall_FDR: if we use the trait-specific FDR or overall FDR. Overall is default, since we look at all factors at once (?)
-filterFactorization <- function(trait.index, fact.matrix, fact.enrichment, FDR = 0.05, overall_FDR = TRUE)
-{
-  factors <- which(fact.matrix[trait.index,] != 0)
-  if(length(factors) == 0)
-  {
-    #no factors significant here; return an empty table
-    print(paste0("No factors significant for ", trait.index))
-    return(fact.enrichment %>% filter(overall_FDR < 0) %>% select(Source, tissue, mark, new_category))
-  }
-  relative_weights <- fact.matrix[trait.index,..factors]^2/sum(fact.matrix[trait.index,..factors]^2)
-  filtered.fact <- fact.enrichment %>% filter(Source %in% paste0("F", factors))
-  if(overall_FDR)
-  {
-    filtered.fact <- filtered.fact %>% filter(overall_FDR < FDR) %>% select(Source, tissue, mark, new_category, overall_FDR)
-  }else
-  {
-    filtered.fact <- filtered.fact %>% filter(within_trait_fdr < FDR) %>% select(Source, tissue, mark, new_category, overall_FDR)
-  }
-  return(filtered.fact)
-}
-
-checkTraitEnrichments <- function(trait.list,trait.ids,  ldsc.reference, answer_thresh)
-{
-  relevant.traits <- c()
-  #count which ones have real enrichments at the answer threshold
-  for(t in trait.list)
-  {
-    trait.id <- trait.studies[t]
-    #Identify all the "true" enrichment for said trait
-    ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thresh, overall_FDR = FALSE) %>% arrange(tissue)
-    if(nrow(ref.enrichment) != 0)
-    {
-      relevant.traits <- c(relevant.traits, t)
-    }else
-    {
-      print("omitting trait #....")
-      print(t)
-    }
-  }
-  return(relevant.traits)
-}
-
-#@PARAM f.ind: the index of the factor we are looking at
-#@param trait.studies: the list of trait study identifiers
-#@param factorization: the actual factorization matrix
-#@param factorization.enrichment: the enrichment information for each factor
-#@param ldsc.reference: the ldsc enrichment information for each trait (our answers/reference
-#@param answer_thresh: the threshold at which enrichments are counted as true
-#Note that here we depart from previous method by accounting for within-"trait" FDR (i.e. across a single factor), not across all factors.
-#The reason for this is that we are interested only in the performance of a single factor.
-#This can easily be changed, see "factor.enrichments <- ..."
-factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorization.enrichment, ldsc.reference, answer_thres = 0.05)
-{
-  pr.list <- list()
-  factor.id <- paste0("F", f.ind)
-  #get the traits in the factor that are nonzero
-  relevant.traits <- which(factorization[,..f.ind] != 0)
-  #determine all of the tissues which are enriched for that factor and their FDR score. Pick only the highest marker per tissue.
-  factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
-    ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
-  all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
-  #FOR EACH of those traits
-  
-  #print(relevant.traits)
-  #relevant.traits <- checkTraitEnrichments(relevant.traits,trait.ids,  ldsc.reference, answer_thres)
-  #print(relevant.traits)
-  #readline()
-  
-  for(t in relevant.traits)
-  {
-    trait.id <- trait.studies[t]
-    #Identify all the "true" enrichment for said trait
-    ref.enrichment <- filterReference(ldsc.reference, trait.id, FDR = answer_thres, overall_FDR = FALSE) %>% arrange(tissue)
-    #Of those, which are enriched in Factor matrix?
-    ref.panel <- as.integer(all.tissues %in% unique(ref.enrichment$tissue))
-    #the label is 1 if a trait is enriched for that tissue at FDR = answer_thres, 0 otherwise
-    est <- data.frame("names" = all.tissues, "labels" = ref.panel, "probs" = factor.enrichments$class_prob )
-    
-    #get the area under the PR curve
-    #Aug 27 executive call:
-      #if a trait has no enrichments at all, then we don't include it.
-    pr.list[[t]] <- PRROC::pr.curve(scores.class0=est[est$labels==1,]$probs,
-                                    scores.class1=est[est$labels==0,]$probs,
-                                    curve=T)
-    #you know, maybe the play is for tissues with no enrichments at all, throw those out.
-    #no, we want to be able to detect
-    if(FALSE)
-    #if(is.na(pr.list[[t]]$auc.integral)) #this means there were no enrichments in the true tissue....
-    {
-      print("Found na")
-      print(paste0("factor", f.ind))
-      print(paste0("Trait", t))
-      print(est)
-      readline()
-    }
-  }
-  #calculate a weighted average...
-  library(stats)
-  pr.scores <- unlist(lapply(relevant.traits, function(i) pr.list[[i]]$auc.integral)) #extract the actual PR scores we've calculated
-  drop <- which(is.na(pr.scores)) #we don't include them in our mean calculation.
-  if(length(drop) < 1)
-  {
-    weights <-  unlist(factorization[relevant.traits,..f.ind]^2 / sum(factorization[relevant.traits,..f.ind]^2)) #extract the weights
-  }else
-  {
-    weights <-  unlist(factorization[relevant.traits,..f.ind]^2 / sum(factorization[relevant.traits,..f.ind]^2))[-drop] #extract the weights
-    pr.scores <- pr.scores[-drop]
-  }
-
-  back <- list()
-  back$traits <- relevant.traits
-  back$aupr <- pr.scores
-  back$weights <- weights
-  #t <- weighted.mean(x = pr.scores, w = weights)
-  back$wmean <- weighted.mean(x = pr.scores, w = weights)
-  
-  return(back)
-}
-
 
 #generate a null pvalue for
 factorSpecificSharingNull <- function(null.factor.traits, ldsc.reference, answer_thres)
@@ -576,7 +361,7 @@ if(args$all || args$factor_specific)
   num.factors.with.enrichemnts <- sum(sapply(1:length(l), function(x) l[[x]]$sharedHits > 0))
   out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "SharedTissues" = sapply(l, function(x) x$sharedHits), "pval(100)" = sapply(l, function(x) x$pval))
   write_tsv(out.df, file = paste0(args$output, "/factor_true_tissue_overlaps.ALL.txt"))
-  
+  print("Here okay...")
   if(FALSE) #me being really lazy here...
   {
     message("Calculating the AUPR per factor (weighted average)....")
@@ -620,7 +405,6 @@ if(args$all || args$factor_specific)
     out.df <- data.frame("Factor" = paste0("F", 1:ncol(factorization)), "AUPR" = sapply(1:ncol(factorization), function(x) factor.aupr[[x]]$pr$auc.integral))
     write_tsv(x = out.df, file = paste0(args$output, "/factor_true_tissue_overlaps.", args$n_overlap, ".txt"))
   }
-  
 }
 
 if(args$overlap_test)
@@ -635,8 +419,9 @@ if(args$overlap_test)
 ################# Simplified metrics
 if(args$all || args$simple)
 {
+  sparsity.threshold <- max(abs(factorization)) * 1e-3 #kind of arbitrary, but at least scaled to the scale of the matrix.
   sharing <- tissueSharingMatrix(args$fdr.thresh, trait.studies,ldsc.reference)
-  check.list <- apply(factorization, 2, function(x) which(abs(x) > 5e-3))
+  check.list <- apply(factorization, 2, function(x) which(abs(x) > sparsity.threshold))
   fact.scores <- sapply(check.list, function(v) simpleScore(v, sharing))
   fact.score.scaling <- sapply(check.list, function(v) choose(length(v), 2))
   fact.dist <- sapply(check.list, function(v) simpleNorm(v, sharing))
@@ -653,7 +438,7 @@ if(args$all || args$simple)
   }
   pval = rowSums(apply(null.scores, 1, function(x) x >= fact.scores))/n.perm
   out.df$Score_pval <- pval
-  out.df$Factor_sparsity <- apply(factorization, 2, function(x) sum(abs(x) <=  1e-4) / length(x)) #note this is confusing, counts number of about-zero entries, so higher --> more sparsity
+  out.df$Factor_sparsity <- apply(factorization, 2, function(x) sum(abs(x) <=  sparsity.threshold) / length(x)) #note this is confusing, counts number of about-zero entries, so higher --> more sparsity
   
   write_tsv(x = out.df, file = paste0(args$output, "/factor_simple_scores.txt"))
   #I am suspicious that denser factors are disfavored in having low p-values- like the null isn't fair.

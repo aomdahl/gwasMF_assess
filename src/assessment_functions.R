@@ -155,13 +155,6 @@ factorSpecificAUPR <- function(f.ind, trait.studies, factorization, factorizatio
   factor.enrichments <- factorization.enrichment %>% filter(Source == factor.id) %>% mutate("class_prob" = 1-within_trait_FDR) %>% group_by(tissue) %>% slice(which.max(class_prob)) %>% 
     ungroup() %>% select(tissue, mark, new_category, class_prob) %>% arrange(tissue) #doing here for within_trait FDR? *** very important
   all.tissues <- unique((factor.enrichments %>% arrange(tissue))$tissue)
-  #FOR EACH of those traits
-  
-  #print(relevant.traits)
-  #relevant.traits <- checkTraitEnrichments(relevant.traits,trait.ids,  ldsc.reference, answer_thres)
-  #print(relevant.traits)
-  #readline()
-  
   for(t in relevant.traits)
   {
     trait.id <- trait.studies[t]
